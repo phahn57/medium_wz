@@ -1,0 +1,50 @@
+---
+title: "medium_p1"
+author: "Peter Hahn"
+format: html
+editor: visual
+---
+## Peter's R - Solving prolonged waiting-times with tidymodels
+Basic script for my medium blog 
+https://kphahn57.medium.com/b5a64d6f5e31
+
+```{r}
+#| label: load-packages
+#| include: false
+library(tidyverse)
+library(explore)
+
+### Load the preprocessed data
+### load data from my repository https://github.com/phahn57/medium_wz
+wait <- read_csv("../data/wait.csv")
+```
+
+## Exploratory data analysis
+
+```{r}
+skimr::skim(wait)
+```
+
+## Using explore
+Explore can only be used interactively
+
+```{r}
+#| eval: false
+library(explore)
+explore(wait)
+```
+
+
+## Additional plots
+```{r}
+wait %>% ggplot(aes(arzt_code,sn_zeit)) + geom_boxplot()
+```
+
+## Dependency of t_diff
+```{r}
+wait %>% ggplot(aes(sn_zeit,t_diff)) + geom_point() 
+```
+
+```{r}
+wait %>% ggplot(aes(p2p,t_diff)) + geom_point() 
+```
