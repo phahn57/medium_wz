@@ -1,0 +1,207 @@
+---
+title: "medium_p3"
+author: "Peter Hahn"
+format: html
+editor: visual
+---
+
+## Peter's R - Solving prolonged waiting-times with tidymodels
+
+### part 3
+
+Script for this medium blog
+
+### Load the preprocessed data
+
+### load data from my repository https://github.com/phahn57/medium_wz
+
+### modify the directory in the read_csv
+
+```{r}
+#| label: load-packages
+#| include: false
+library(tidyverse)
+library(tidymodels)
+
+### Load the preprocessed data
+### load data from my repository https://github.com/phahn57/medium_wz
+wait <- read_csv("../data/wait.csv")
+### Variables used
+ml_fall <- wait %>% select(arzt_code,p2p,ops,stat,age)
+```
+
+### Data budget
+```{r}
+set.seed(1234)
+fall_split <- ml_fall %>%
+  initial_split(strata = p2p) 
+hc_train <- training(fall_split)
+hc_test <- testing(fall_split)
+```
+
+
+### Recipe
+```{r}
+fall_rec <- recipe(p2p ~ ., data = hc_train) %>%
+        step_other(ops, threshold = 0.02) %>% 
+        # step_other(arzt_code, threshold = 0.01) %>% 
+        step_dummy(all_nominal(), -all_outcomes()) %>%
+        #step_pca(matches("(ops)"), num_comp = 7) %>% 
+        # step_interact(~ wtag:doc_class) %>%
+        step_zv()
+```
+
+### Define random forest workflow from part2
+```{r}
+rf_model <- 
+  rand_forest(trees = 500) %>% 
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+rf_wflow <- 
+  workflow() %>% 
+        add_recipe(fall_rec) %>%         
+        #add_formula(p2p ~ .) %>% 
+        add_model(rf_model) 
+
+hc_train <- hc_train  %>% filter(!is.na(arzt_code))
+```
+
+### Sampling 10-fold cross-validation 
+```{r}
+hc_fold <- vfold_cv(hc_train, v = 10)
+hc_fold
+```
+
+### Fit
+```{r}
+keep_pred <- control_resamples(save_pred = TRUE, save_workflow = TRUE)
+set.seed(1003)
+library(doMC)
+registerDoMC(cores = 6)
+rf_res <- 
+  rf_wflow %>% 
+  fit_resamples(resamples = hc_fold, control = keep_pred)
+registerDoSEQ()
+```
+
+```{r}
+collect_metrics(rf_res)
+```
+
+```{r}
+assess_res <- collect_predictions(rf_res)
+```
+
+```{r}
+assess_res %>% 
+  ggplot(aes(x = p2p, y = .pred)) + 
+  geom_point(alpha = .15) +
+  geom_abline(color = "red") + 
+  coord_obs_pred() + 
+  ylab("Predicted")
+```
+
+## Tuning and grid search
+### Model xgboost
+```{r}
+fall_rec <- recipe(p2p ~ ., data = hc_train) %>%
+        step_other(ops, threshold = 0.02) %>% 
+        #step_other(arzt_code, threshold = tune("arzt_code")) %>% 
+        step_dummy(all_nominal(), -all_outcomes()) %>%
+        step_zv()
+
+
+xgb_spec <- boost_tree(
+  trees = 1000, 
+  tree_depth = tune(), min_n = tune(), 
+  loss_reduction = tune(),                     ## first three: model complexity
+  sample_size = tune(),mtry = tune(),         ## randomness
+  learn_rate = tune(),                         ## step size
+) %>% 
+  set_engine("xgboost") %>% 
+  set_mode("regression")
+
+xgb_spec
+```
+
+### Look at the parameters
+comment #mtry = tune() for this step. mtry must be estimated bsed on the training data.
+```{r}
+xgb_param <- extract_parameter_set_dials(xgb_spec)
+xgb_param %>% extract_parameter_dials("tree_depth")
+```
+
+```{r}
+xgb_param %>% extract_parameter_dials("min_n")
+```
+
+
+### Regular grid:
+```{r}
+crossing(
+  tree_depth = c(1,7,15),
+  min_n = c(2,10,20,30,40)
+)
+```
+### grid regular
+gives an error as long as mtry is tuned. 
+```{r}
+grid_regular(xgb_param, levels =3)
+```
+```{r}
+xgb_wf <- workflow() %>% 
+        add_model(xgb_spec) %>% 
+        #add_formula(sn_zeit ~.)
+        add_recipe(fall_rec)
+
+set.seed(234)
+
+
+xgb_grid <- grid_latin_hypercube(
+  tree_depth(),
+  min_n(),
+  loss_reduction(),
+  sample_size = sample_prop(),
+  finalize(mtry(), hc_train),
+  learn_rate(),
+  size = 100
+)
+xgb_grid
+```
+## Fit the model
+
+```{r}
+
+registerDoMC(cores = 6)
+xgb_res <- tune_grid(
+  xgb_wf,
+  resamples = hc_fold,
+  grid = xgb_grid,
+  control = control_grid(save_pred = TRUE)
+)
+registerDoSEQ()
+```
+
+```{r}
+collect_metrics(xgb_res)
+```
+
+```{r}
+best_rmse <- select_best(xgb_res, "rmse")
+```
+
+## Finalize model and show 
+```{r}
+final_xgb <- finalize_workflow(
+  xgb_wf,
+  best_rmse
+)
+
+library(vip)
+
+final_xgb %>%
+  fit(data = hc_train) %>%
+  pull_workflow_fit() %>%
+  vip(geom = "point", num_features = 15)
+```
