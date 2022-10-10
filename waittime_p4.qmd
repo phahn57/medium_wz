@@ -1,0 +1,180 @@
+---
+title: "wartezeit_p4"
+format: html
+editor: visual
+---
+
+## Peter's R - Solving prolonged waiting-times with tidymodels
+
+### part 4
+
+Script for this medium blog
+https://kphahn57.medium.com/peters-r-solving-prolonged-waiting-times-with-tidymodels-p4-242724e0dac7
+
+
+### Load the preprocessed data
+
+### load data from my repository https://github.com/phahn57/medium_wz
+
+For this part you need wait_2.csv which contains additional text information.
+
+### modify the directory in the read_csv
+
+```{r}
+#| label: load-packages
+#| include: false
+library(tidyverse)
+library(tidytext)
+library(tidymodels)
+library(janitor)
+library(doMC)
+library(textrecipes)
+library(embed)
+
+### Load the preprocessed data
+### load data from my repository https://github.com/phahn57/medium_wz
+wait <- read_csv("../data/wait_2.csv")
+### Variables used
+### Load the preprocessed data
+```
+
+### Use subset of available data
+
+#### remove numbers
+
+```{r}
+ml_fall <- wait %>% mutate(bez = str_c(op_kenn, bez, sep = " ")) %>%
+        mutate(bez = str_remove_all(bez,"[0-9]")) %>%
+        mutate(bez = str_remove_all(bez,"\\(|\\)|\\:|\\.")) %>%
+        filter(p2p - sn_zeit < 40) ## ungewöhnlich hohe Differenz !
+
+ml_fall <- ml_fall %>% select(age, p2p, wtag, arzt_code, stat, bez)
+```
+
+### Split data and build folds
+
+```{r}
+set.seed(1234)
+fall_split <- ml_fall %>%
+  initial_split(strata = p2p) 
+hc_train <- training(fall_split)
+hc_test <- testing(fall_split)
+
+hc_fold <- vfold_cv(hc_train, v = 10)
+rm(ml_fall)
+```
+
+```{r}
+basic_rec <- 
+    recipe(p2p ~ ., data = hc_train) %>%
+        step_tokenize(bez)  %>%
+        step_stopwords(bez, language = "de") %>%
+        step_tokenfilter(bez, max_tokens = tune()) %>%
+        step_tf(bez) %>% 
+        #step_lencode_glm(op_kenn, outcome =vars(p2p)) %>% 
+        step_dummy(all_nominal(), -all_outcomes()) %>%
+        step_zv()
+
+```
+
+```{r}
+library(rules)
+library(baguette)
+xgb_spec <- 
+   boost_tree(tree_depth = tune(),learn_rate = tune(), loss_reduction = tune(), 
+              min_n = tune(), sample_size = tune(), trees = tune()) %>%  
+   set_engine("xgboost") %>% 
+   set_mode("regression")
+
+xgb_wf <- 
+        workflow() %>% 
+        add_recipe(basic_rec) %>% 
+        add_model(xgb_spec)
+xgb_wf
+```
+
+```{r}
+library(finetune)
+
+xgb_param <- extract_parameter_set_dials(xgb_wf)
+
+registerDoMC(cores = 6)
+multi_metric <- metric_set(rmse)
+
+set.seed(1308)
+xgb_race <-
+  xgb_wf %>%
+  tune_race_anova(
+    hc_fold,
+    grid = 20,
+    param_info = xgb_param,
+    metrics = multi_metric,
+    control = control_race(save_pred = TRUE, verbose_elim = TRUE)
+  )
+
+registerDoSEQ()
+```
+
+## Last_fit
+
+Fit the best model to the training set and evaluate against the test set.
+
+```{r}
+best_results_all <- 
+        xgb_race %>% 
+        show_best(metric = "rmse")
+
+best_results <- 
+        xgb_race %>% 
+        select_best(metric = "rmse")
+
+boosting_test_results <- 
+   xgb_wf %>% 
+   finalize_workflow(best_results) %>% 
+   last_fit(split = fall_split)
+
+collect_metrics(boosting_test_results)
+```
+
+```{r}
+boosting_test_results %>% 
+   collect_predictions() %>% 
+   ggplot(aes(x = p2p, y = .pred)) + 
+   geom_abline(color = "gray50", lty = 2) + 
+   geom_point(alpha = 0.5) + 
+   coord_obs_pred() + 
+   labs(x = "observed", y = "p2p predicted")
+```
+
+### Importance
+
+```{r}
+library(vip)
+
+final_wfl <- 
+   xgb_wf %>% 
+   finalize_workflow(best_results)
+
+fitted_wfl <- final_wfl %>%  
+        fit(data = hc_train) 
+
+fitted_wfl %>%
+  extract_fit_parsnip() %>%
+  vip(geom = "point", num_features = 15)
+```
+
+```{r}
+predict(fitted_wfl,hc_test[2,])
+```
+
+```{r}
+saveRDS(wz_model, "../models/model1.RDS")
+```
+
+```{r}
+mod1 <- readRDS("../models/model1.RDS")
+```
+
+```{r}
+predict(mod1,hc_test[4,])
+```
